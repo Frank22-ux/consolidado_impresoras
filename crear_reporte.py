@@ -1,16 +1,79 @@
 import pandas as pd
 from docx import Document
-from docx.shared import Inches
 from sklearn.linear_model import LinearRegression
 import numpy as np
+import sys
+
+# --- INICIO DE FUNCIONES AUXILIARES ---
+
+def generar_proyeccion(df_datos, columna_consumo):
+    """
+    Calcula la proyección a 6 y 12 meses para una columna de consumo.
+    Devuelve las predicciones o None si no hay suficientes datos.
+    """
+    # Agrupa por fecha para asegurar una serie temporal mensual
+    consumo_mensual = df_datos.groupby('Fecha')[columna_consumo].sum().reset_index()
+    
+    if len(consumo_mensual) < 2:
+        return None  # No hay suficientes datos para calcular una tendencia
+
+    consumo_mensual['Mes_Num'] = np.arange(len(consumo_mensual))
+    modelo = LinearRegression()
+    modelo.fit(consumo_mensual[['Mes_Num']], consumo_mensual[columna_consumo])
+    
+    ultimo_mes_num = consumo_mensual['Mes_Num'].max()
+    meses_futuros = np.array([[ultimo_mes_num + 6], [ultimo_mes_num + 12]])
+    predicciones = modelo.predict(meses_futuros).round(0)
+    
+    # Devuelve las predicciones solo si no son negativas
+    if predicciones[0] >= 0 and predicciones[1] >= 0:
+        return predicciones
+    return None
+
+def agregar_tabla_a_word(documento, df_datos, titulo=""):
+    """
+    Añade un título y un DataFrame de pandas como una tabla a un documento de Word.
+    """
+    if titulo:
+        documento.add_paragraph(titulo, style='Heading 4')
+        
+    if df_datos.empty:
+        documento.add_paragraph("No se generaron datos para esta tabla.")
+        return
+
+    tabla = documento.add_table(rows=1, cols=len(df_datos.columns))
+    tabla.style = 'Table Grid'
+    
+    # Escribir encabezados
+    for i, nombre_columna in enumerate(df_datos.columns):
+        tabla.cell(0, i).text = str(nombre_columna)
+        
+    # Escribir filas de datos
+    for _, fila in df_datos.iterrows():
+        celdas_fila = tabla.add_row().cells
+        for i, valor in enumerate(fila):
+            # Formato de número con punto como separador de miles
+            if isinstance(valor, (int, float, np.integer)):
+                celdas_fila[i].text = f"{int(valor):,}".replace(',', '.')
+            else:
+                celdas_fila[i].text = str(valor)
+
+# --- INICIO DEL SCRIPT PRINCIPAL ---
 
 # --- Configuración ---
 archivo_entrada = 'resumen_consolidado.xlsx'
 archivo_salida_word = 'Reporte_Analisis_Consumo_Anual_Completo.docx'
 
-# --- 1. Cargar y Preparar los Datos ---
-print(f"Leyendo la hoja 'Resumen Detallado' del archivo: {archivo_entrada}...")
-df = pd.read_excel(archivo_entrada, sheet_name='Resumen Detallado')
+# --- 1. Cargar y Preparar los Datos (con manejo de errores) ---
+try:
+    print(f"Leyendo la hoja 'Resumen Detallado' del archivo: {archivo_entrada}...")
+    df = pd.read_excel(archivo_entrada, sheet_name='Resumen Detallado')
+except FileNotFoundError:
+    print(f"❌ ERROR: No se encontró el archivo '{archivo_entrada}'. Asegúrate de que esté en la misma carpeta que el script.")
+    sys.exit() # Detiene la ejecución si no se encuentra el archivo
+except Exception as e:
+    print(f"❌ Ocurrió un error inesperado al leer el archivo: {e}")
+    sys.exit()
 
 print("Convirtiendo periodos a fechas...")
 meses_es = {
@@ -46,82 +109,46 @@ for año in años_en_datos:
     print(f"Calculando promedios para {año}...")
     analisis_detallado = df_año.groupby(['Agencia', 'Departamento'])[columnas_analisis].mean().round(0)
     analisis_detallado.reset_index(inplace=True)
-    documento.add_paragraph(f"La siguiente tabla muestra el promedio mensual de consumo para {año}.")
-    tabla_analisis = documento.add_table(rows=1, cols=len(analisis_detallado.columns))
-    tabla_analisis.style = 'Table Grid'
-    for i, nombre_columna in enumerate(analisis_detallado.columns):
-        tabla_analisis.cell(0, i).text = str(nombre_columna)
-    for index, fila in analisis_detallado.iterrows():
-        celdas_fila = tabla_analisis.add_row().cells
-        for i, valor in enumerate(fila):
-            celdas_fila[i].text = f"{valor:,.0f}".replace(',', '.') if isinstance(valor, (int, float)) else str(valor)
+    documento.add_paragraph(f"La siguiente tabla muestra el promedio mensual de consumo para {año}, agrupado por agencia y departamento.")
+    agregar_tabla_a_word(documento, analisis_detallado)
 
     # Proyecciones
     print(f"Realizando proyecciones basadas en los datos de {año}...")
     documento.add_heading(f'Proyecciones a Futuro (Basado en {año})', level=3)
     
-    # Proyección por Tipo de Consumo
-    proyecciones_por_tipo = {}
+    # a) Proyección por Tipo de Consumo (General)
+    datos_proy_tipo = []
     for columna in columnas_analisis:
-        consumo_mensual = df_año.groupby('Fecha')[columna].sum().reset_index()
-        if len(consumo_mensual) > 1:
-            consumo_mensual['Mes_Num'] = np.arange(len(consumo_mensual))
-            modelo = LinearRegression()
-            modelo.fit(consumo_mensual[['Mes_Num']], consumo_mensual[columna])
-            ultimo_mes_num = consumo_mensual['Mes_Num'].max()
-            meses_futuros = np.array([[ultimo_mes_num + 6], [ultimo_mes_num + 12]])
-            predicciones = modelo.predict(meses_futuros).round(0)
-            if predicciones[0] >= 0:
-                proyecciones_por_tipo[columna] = predicciones
-    
-    if proyecciones_por_tipo:
-        documento.add_paragraph("Proyección por tipo de consumo (General):", style='Heading 4')
-        tabla_proy_tipo = documento.add_table(rows=1, cols=3)
-        tabla_proy_tipo.style = 'Table Grid'
-        tabla_proy_tipo.cell(0, 0).text = 'Tipo de Consumo'
-        tabla_proy_tipo.cell(0, 1).text = 'Proyección a 6 Meses'
-        tabla_proy_tipo.cell(0, 2).text = 'Proyección a 1 Año'
-        for tipo, proyecciones in proyecciones_por_tipo.items():
-            celdas_fila = tabla_proy_tipo.add_row().cells
-            celdas_fila[0].text = str(tipo)
-            celdas_fila[1].text = f"{int(proyecciones[0]):,}".replace(',', '.')
-            celdas_fila[2].text = f"{int(proyecciones[1]):,}".replace(',', '.')
+        predicciones = generar_proyeccion(df_año, columna)
+        if predicciones is not None:
+            datos_proy_tipo.append({
+                'Tipo de Consumo': columna,
+                'Proyección a 6 Meses': predicciones[0],
+                'Proyección a 1 Año': predicciones[1]
+            })
+    df_proyecciones_tipo = pd.DataFrame(datos_proy_tipo)
+    agregar_tabla_a_word(documento, df_proyecciones_tipo, "Proyección general por tipo de consumo:")
 
-    # --- LÓGICA REINCORPORADA: Proyección por Agencia y por Tipo ---
-    proyecciones_por_agencia_detallado = {}
-    for agencia in df_año['Agencia'].unique():
-        df_agencia = df_año[df_año['Agencia'] == agencia]
+    # b) Proyección por Agencia y por Tipo
+    datos_proy_agencia = []
+    for agencia, df_agencia in df_año.groupby('Agencia'):
         for columna in columnas_analisis:
-            consumo_mensual = df_agencia.groupby('Fecha')[columna].sum().reset_index()
-            if len(consumo_mensual) > 1:
-                consumo_mensual['Mes_Num'] = np.arange(len(consumo_mensual))
-                modelo = LinearRegression()
-                modelo.fit(consumo_mensual[['Mes_Num']], consumo_mensual[columna])
-                ultimo_mes_num = consumo_mensual['Mes_Num'].max()
-                meses_futuros = np.array([[ultimo_mes_num + 6], [ultimo_mes_num + 12]])
-                predicciones = modelo.predict(meses_futuros).round(0)
-                if predicciones[0] >= 0:
-                    if agencia not in proyecciones_por_agencia_detallado:
-                        proyecciones_por_agencia_detallado[agencia] = {}
-                    proyecciones_por_agencia_detallado[agencia][columna] = predicciones
-
-    if proyecciones_por_agencia_detallado:
-        documento.add_paragraph("Proyección por agencia y tipo de consumo:", style='Heading 4')
-        tabla_proy_agencia = documento.add_table(rows=1, cols=4)
-        tabla_proy_agencia.style = 'Table Grid'
-        tabla_proy_agencia.cell(0, 0).text = 'Agencia'
-        tabla_proy_agencia.cell(0, 1).text = 'Tipo de Consumo'
-        tabla_proy_agencia.cell(0, 2).text = 'Proyección a 6 Meses'
-        tabla_proy_agencia.cell(0, 3).text = 'Proyección a 1 Año'
-        for agencia, proyecciones_tipos in proyecciones_por_agencia_detallado.items():
-            for tipo, proyecciones in proyecciones_tipos.items():
-                celdas_fila = tabla_proy_agencia.add_row().cells
-                celdas_fila[0].text = str(agencia)
-                celdas_fila[1].text = str(tipo)
-                celdas_fila[2].text = f"{int(proyecciones[0]):,}".replace(',', '.')
-                celdas_fila[3].text = f"{int(proyecciones[1]):,}".replace(',', '.')
+            predicciones = generar_proyeccion(df_agencia, columna)
+            if predicciones is not None:
+                datos_proy_agencia.append({
+                    'Agencia': agencia,
+                    'Tipo de Consumo': columna,
+                    'Proyección a 6 Meses': predicciones[0],
+                    'Proyección a 1 Año': predicciones[1]
+                })
+    df_proyecciones_agencia = pd.DataFrame(datos_proy_agencia)
+    agregar_tabla_a_word(documento, df_proyecciones_agencia, "Proyección detallada por agencia y tipo de consumo:")
 
 # --- 4. Guardar el Documento ---
-documento.save(archivo_salida_word)
-print("-" * 30)
-print(f"✅ ¡Reporte anual generado exitosamente en '{archivo_salida_word}'!")
+try:
+    documento.save(archivo_salida_word)
+    print("-" * 30)
+    print(f"✅ ¡Reporte anual generado exitosamente en '{archivo_salida_word}'!")
+except Exception as e:
+    print(f"❌ ERROR: No se pudo guardar el archivo de Word. Asegúrate de que no esté abierto.")
+    print(f"   Detalle del error: {e}")
